@@ -29,7 +29,7 @@ const scanSchema = new mongoose.Schema({
 
 const Scan = mongoose.model('Scan', scanSchema);
 
-// Suspicious patterns for detection
+// Suspicious patterns
 const suspiciousKeywords = [
   'secure', 'verify', 'account', 'login', 'update', 'confirm',
   'alert', 'suspicious', 'unusual', 'urgent', 'paypal',
@@ -41,13 +41,35 @@ const suspiciousDomains = [
   '.xyz', '.top', '.club', '.work', '.click', '.tk', '.ml'
 ];
 
-// Scan API Endpoint
+// ROOT ROUTE - Fixes "Cannot GET /"
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'CyberSenseAI API is running!',
+        version: '1.0.0',
+        endpoints: {
+            health: 'GET /health',
+            scan: 'POST /api/scan',
+            history: 'GET /api/history'
+        }
+    });
+});
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        message: 'CyberSenseAI API is running',
+        timestamp: new Date().toISOString(),
+        mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
+    });
+});
+
+// Scan API
 app.post('/api/scan', async (req, res) => {
   try {
     const { url } = req.body;
     const apiKey = req.headers['x-api-key'];
     
-    // Check API key
     if (apiKey !== process.env.MASTER_API_KEY) {
       return res.status(401).json({ error: 'Invalid API key' });
     }
@@ -63,7 +85,6 @@ app.post('/api/scan', async (req, res) => {
     const suspiciousPatternsFound = [];
     let sslStatus = "unknown";
     
-    // Check for suspicious keywords
     for (const keyword of suspiciousKeywords) {
       if (lowerUrl.includes(keyword)) {
         suspiciousKeywordsFound.push(keyword);
@@ -72,7 +93,6 @@ app.post('/api/scan', async (req, res) => {
       }
     }
     
-    // Check for suspicious domains
     for (const domain of suspiciousDomains) {
       if (lowerUrl.includes(domain)) {
         suspiciousPatternsFound.push(domain);
@@ -81,53 +101,37 @@ app.post('/api/scan', async (req, res) => {
       }
     }
     
-    // Check HTTP vs HTTPS
     if (lowerUrl.startsWith('http://')) {
       sslStatus = "insecure";
       reasons.push('Uses HTTP (not secure)');
       riskScore += 15;
     } else if (lowerUrl.startsWith('https://')) {
       sslStatus = "secure";
-      reasons.push('Uses HTTPS (secure connection)');
     }
     
-    // Check for IP address
-    const ipMatch = lowerUrl.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
-    if (ipMatch) {
-      suspiciousPatternsFound.push(`IP Address: ${ipMatch[0]}`);
-      reasons.push(`Uses IP address instead of domain name`);
-      riskScore += 25;
-    }
-    
-    // Calculate final risk score
     riskScore = Math.min(riskScore, 100);
     const isPhishing = riskScore >= 50;
     
-    // Generate recommendations
     let recommendations = [];
     if (riskScore >= 70) {
       recommendations = [
-        "🚨 DO NOT proceed to this website",
-        "📢 Report this URL to phishing databases",
-        "🔐 Never enter personal information",
-        "📧 If received via email, report as phishing"
+        "🚨 DO NOT proceed",
+        "📢 Report this URL",
+        "🔐 Never enter personal information"
       ];
     } else if (riskScore >= 30) {
       recommendations = [
         "⚠️ Be extremely cautious",
-        "🔍 Verify the website through official channels",
-        "❌ Don't click on suspicious links",
-        "📞 Contact the company directly if unsure"
+        "🔍 Verify through official channels",
+        "❌ Don't click on suspicious links"
       ];
     } else {
       recommendations = [
         "✅ Website appears safe",
-        "🛡️ Always keep your browser updated",
-        "🔒 Use additional security tools for protection"
+        "🛡️ Keep browser updated"
       ];
     }
     
-    // Save to database
     const scan = new Scan({
       url, isPhishing, riskScore, reasons,
       suspiciousKeywords: suspiciousKeywordsFound,
@@ -136,9 +140,6 @@ app.post('/api/scan', async (req, res) => {
     });
     await scan.save();
     
-    console.log(`✅ Scan saved: ${url} - Risk: ${riskScore}%`);
-    
-    // Return response
     res.json({
       success: true,
       url,
@@ -153,12 +154,11 @@ app.post('/api/scan', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Scan error:', error);
-    res.status(500).json({ error: 'Failed to scan URL: ' + error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get scan history
+// Get history
 app.get('/api/history', async (req, res) => {
   try {
     const apiKey = req.headers['x-api-key'];
@@ -168,51 +168,13 @@ app.get('/api/history', async (req, res) => {
     }
     
     const scans = await Scan.find().sort({ scannedAt: -1 }).limit(100);
-    console.log(`📜 Retrieved ${scans.length} history records`);
-    
-    res.json({ success: true, history: scans, count: scans.length });
+    res.json({ success: true, history: scans });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch history' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'CyberSenseAI API is running',
-    timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
-  });
-});
-
-// Delete scan history
-app.delete('/api/history/:id', async (req, res) => {
-  try {
-    const apiKey = req.headers['x-api-key'];
-    
-    if (apiKey !== process.env.MASTER_API_KEY) {
-      return res.status(401).json({ error: 'Invalid API key' });
-    }
-    
-    const { id } = req.params;
-    
-    if (id === 'all') {
-      await Scan.deleteMany({});
-      res.json({ success: true, message: 'All history cleared' });
-    } else {
-      await Scan.findByIdAndDelete(id);
-      res.json({ success: true, message: 'Entry deleted' });
-    }
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to delete' });
-  }
-});
-
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔑 API Key required: X-API-Key: ${process.env.MASTER_API_KEY}`);
 });
