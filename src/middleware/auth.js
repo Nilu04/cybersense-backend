@@ -4,18 +4,10 @@ const User = require('../models/User');
 const authenticate = async (req, res, next) => {
     try {
         const token = req.header('Authorization')?.replace('Bearer ', '');
-        
-        if (!token) {
-            throw new Error();
-        }
-
+        if (!token) throw new Error();
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.userId);
-
-        if (!user) {
-            throw new Error();
-        }
-
+        if (!user) throw new Error();
         req.user = user;
         next();
     } catch (error) {
@@ -30,13 +22,11 @@ const verifyApiKey = async (req, res, next) => {
         return res.status(401).json({ error: 'API key required' });
     }
 
-    // Check master API key
     if (apiKey === process.env.MASTER_API_KEY) {
         req.isMasterKey = true;
         return next();
     }
 
-    // Check user API key
     const user = await User.findOne({ apiKey });
     if (!user) {
         return res.status(401).json({ error: 'Invalid API key' });

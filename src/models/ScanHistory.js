@@ -20,6 +20,10 @@ const scanHistorySchema = new mongoose.Schema({
         max: 100
     },
     reasons: [String],
+    suspiciousKeywords: [String],
+    suspiciousPatterns: [String],
+    sslStatus: String,
+    recommendations: [String],
     status: {
         type: String,
         enum: ['safe', 'suspicious', 'phishing', 'blocked'],
@@ -30,5 +34,7 @@ const scanHistorySchema = new mongoose.Schema({
         default: Date.now
     }
 });
+
+scanHistorySchema.index({ userId: 1, scannedAt: -1 });
 
 module.exports = mongoose.model('ScanHistory', scanHistorySchema);

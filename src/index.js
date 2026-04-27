@@ -27,12 +27,12 @@ app.use('/api/auth', authRoutes);
 app.use('/api/scan', scanRoutes);
 app.use('/api/history', historyRoutes);
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date() });
+    res.json({ status: 'OK', timestamp: new Date(), message: 'CyberSenseAI API is running' });
 });
 
-// Error handling middleware
+// Error handling
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({ error: 'Something went wrong!' });
@@ -40,5 +40,6 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📡 Health check: http://localhost:${PORT}/health`);
 });

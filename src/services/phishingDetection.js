@@ -14,104 +14,78 @@ class PhishingDetectionService {
         ];
     }
 
-    async scanUrl(url, apiKey) {
+    async scanUrl(url) {
         const results = {
             isPhishing: false,
             riskScore: 0,
-            reasons: []
+            reasons: [],
+            suspiciousKeywords: [],
+            suspiciousPatterns: [],
+            sslStatus: "unknown",
+            recommendations: []
         };
 
-        // 1. Local pattern matching
-        const localResult = this.localScan(url);
-        results.reasons.push(...localResult.reasons);
-        
-        if (localResult.isPhishing) {
-            results.isPhishing = true;
-            results.riskScore += 60;
-        }
-
-        // 2. Google Safe Browsing API (if API key available)
-        if (process.env.GOOGLE_SAFE_BROWSING_API_KEY) {
-            const googleResult = await this.googleSafeBrowsingScan(url);
-            if (googleResult.isPhishing) {
-                results.isPhishing = true;
-                results.riskScore += 30;
-                results.reasons.push('• Flagged by Google Safe Browsing');
-            }
-        }
-
-        // Calculate final risk score
-        results.riskScore = Math.min(results.riskScore + localResult.riskScore, 100);
-        
-        return results;
-    }
-
-    localScan(url) {
         const lowerUrl = url.toLowerCase();
-        const reasons = [];
-        let riskScore = 0;
-
-        // Check for suspicious keywords
+        
+        // Check keywords
         for (const keyword of this.suspiciousKeywords) {
             if (lowerUrl.includes(keyword)) {
-                reasons.push(`• Contains suspicious keyword: ${keyword}`);
-                riskScore += 10;
+                results.suspiciousKeywords.push(keyword);
+                results.reasons.push(`• Contains suspicious keyword: ${keyword}`);
+                results.riskScore += 10;
             }
         }
 
-        // Check for suspicious domains
+        // Check domains
         for (const domain of this.suspiciousDomains) {
             if (lowerUrl.includes(domain)) {
-                reasons.push(`• Suspicious domain pattern: ${domain}`);
-                riskScore += 20;
+                results.suspiciousPatterns.push(domain);
+                results.reasons.push(`• Suspicious domain pattern: ${domain}`);
+                results.riskScore += 20;
             }
         }
 
-        // Check for HTTP
+        // Check HTTP
         if (lowerUrl.startsWith('http://')) {
-            reasons.push('• Uses HTTP (not secure)');
-            riskScore += 15;
+            results.sslStatus = "insecure";
+            results.reasons.push('• Uses HTTP (not secure)');
+            results.riskScore += 15;
+        } else if (lowerUrl.startsWith('https://')) {
+            results.sslStatus = "secure";
         }
 
-        // Check for IP address
-        if (lowerUrl.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/)) {
-            reasons.push('• Uses IP address instead of domain name');
-            riskScore += 25;
+        // Check IP address
+        const ipMatch = lowerUrl.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+        if (ipMatch) {
+            results.suspiciousPatterns.push(`IP Address: ${ipMatch[0]}`);
+            results.reasons.push(`• Uses IP address instead of domain name`);
+            results.riskScore += 25;
         }
 
-        return {
-            isPhishing: riskScore >= 50,
-            riskScore: Math.min(riskScore, 100),
-            reasons
-        };
-    }
-
-    async googleSafeBrowsingScan(url) {
-        try {
-            const apiKey = process.env.GOOGLE_SAFE_BROWSING_API_KEY;
-            const response = await axios.post(
-                `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${apiKey}`,
-                {
-                    client: {
-                        clientId: "cybersenseai",
-                        clientVersion: "1.0.0"
-                    },
-                    threatInfo: {
-                        threatTypes: ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
-                        platformTypes: ["ANY_PLATFORM"],
-                        threatEntryTypes: ["URL"],
-                        threatEntries: [{ url: url }]
-                    }
-                }
-            );
-            
-            return {
-                isPhishing: response.data.matches && response.data.matches.length > 0
-            };
-        } catch (error) {
-            console.error('Google Safe Browsing API error:', error.message);
-            return { isPhishing: false };
+        // Recommendations
+        if (results.riskScore >= 70) {
+            results.recommendations = [
+                "🚨 DO NOT proceed to this website",
+                "📢 Report this URL to phishing databases",
+                "🔐 Never enter personal information"
+            ];
+        } else if (results.riskScore >= 30) {
+            results.recommendations = [
+                "⚠️ Be extremely cautious",
+                "🔍 Verify the website through official channels",
+                "❌ Don't click on suspicious links"
+            ];
+        } else {
+            results.recommendations = [
+                "✅ Website appears safe",
+                "🛡️ Always keep your browser updated"
+            ];
         }
+        
+        results.riskScore = Math.min(results.riskScore, 100);
+        results.isPhishing = results.riskScore >= 50;
+
+        return results;
     }
 }
 
