@@ -435,3 +435,25 @@ app.listen(PORT, () => {
   console.log(`🔍 Scan: POST /api/scan`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
 });
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        const user = await User.findOne({ email });
+        
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'Email not found' });
+        }
+        
+        // Generate reset token
+        const resetToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        
+        // In production, send email here
+        console.log(`Password reset token for ${email}: ${resetToken}`);
+        
+        res.json({ success: true, message: 'Reset link sent to email' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
