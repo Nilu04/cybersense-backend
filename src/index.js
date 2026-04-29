@@ -21,19 +21,19 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // User Model
 const userSchema = new mongoose.Schema({
-    username: { type: String, required: true, unique: true },
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    apiKey: { type: String, unique: true },
-    profilePicture: { type: String, default: null }, // NEW: store base64 image
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
-    level: { type: Number, default: 1 },
-    xp: { type: Number, default: 0 },
-    totalScans: { type: Number, default: 0 },
-    threatsBlocked: { type: Number, default: 0 },
-    reportsSubmitted: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now },
-    lastLogin: Date
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  apiKey: { type: String, unique: true },
+  profilePicture: { type: String, default: null },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  level: { type: Number, default: 1 },
+  xp: { type: Number, default: 0 },
+  totalScans: { type: Number, default: 0 },
+  threatsBlocked: { type: Number, default: 0 },
+  reportsSubmitted: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  lastLogin: Date
 });
 
 userSchema.pre('save', async function(next) {
@@ -92,7 +92,7 @@ const Notification = mongoose.model('Notification', notificationSchema);
 
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
 // Rate limiting
@@ -225,7 +225,16 @@ app.post('/api/auth/register', async (req, res) => {
     res.json({
       success: true,
       token,
-      user: { id: user._id, username, email, apiKey: user.apiKey, level: 1, xp: 0 }
+      user: { 
+        id: user._id, 
+        username, 
+        email, 
+        apiKey: user.apiKey, 
+        level: 1, 
+        xp: 0,
+        totalScans: 0,
+        threatsBlocked: 0
+      }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -249,15 +258,183 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({
       success: true,
       token,
-      user: { id: user._id, username: user.username, email: user.email, apiKey: user.apiKey, level: user.level, xp: user.xp }
+      user: { 
+        id: user._id, 
+        username: user.username, 
+        email: user.email, 
+        apiKey: user.apiKey, 
+        level: user.level, 
+        xp: user.xp,
+        totalScans: user.totalScans,
+        threatsBlocked: user.threatsBlocked
+      }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/auth/profile', authenticate, async (req, res) => {
-  res.json({ success: true, user: req.user });
+// ==================== USER PROFILE ROUTES ====================
+
+app.get('/api/user/profile', authenticate, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      user: {
+        id: req.user._id,
+        username: req.user.username,
+        email: req.user.email,
+        level: req.user.level,
+        xp: req.user.xp,
+        totalScans: req.user.totalScans,
+        threatsBlocked: req.user.threatsBlocked,
+        reportsSubmitted: req.user.reportsSubmitted,
+        profilePicture: req.user.profilePicture || null,
+        createdAt: req.user.createdAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/user/username', authenticate, async (req, res) => {
+  try {
+    const { newUsername } = req.body;
+    
+    if (!newUsername || newUsername.length < 3) {
+      return res.status(400).json({ success: false, error: 'Username must be at least 3 characters' });
+    }
+    
+    const existingUser = await User.findOne({ 
+      username: newUsername, 
+      _id: { $ne: req.user._id } 
+    });
+    
+    if (existingUser) {
+      return res.status(400).json({ success: false, error: 'Username already taken' });
+    }
+    
+    req.user.username = newUsername;
+    await req.user.save();
+    
+    res.json({ success: true, username: newUsername, message: 'Username updated successfully' });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/user/password', authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    const isValid = await req.user.comparePassword(currentPassword);
+    if (!isValid) {
+      return res.status(401).json({ success: false, error: 'Current password is incorrect' });
+    }
+    
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+    
+    req.user.password = newPassword;
+    await req.user.save();
+    
+    res.json({ success: true, message: 'Password updated successfully' });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/user/stats', authenticate, async (req, res) => {
+  try {
+    const { xp, level, totalScans, threatsBlocked } = req.body;
+    
+    if (xp !== undefined) req.user.xp = xp;
+    if (level !== undefined) req.user.level = level;
+    if (totalScans !== undefined) req.user.totalScans = totalScans;
+    if (threatsBlocked !== undefined) req.user.threatsBlocked = threatsBlocked;
+    
+    await req.user.save();
+    
+    res.json({ 
+      success: true, 
+      user: {
+        username: req.user.username,
+        email: req.user.email,
+        level: req.user.level,
+        xp: req.user.xp,
+        totalScans: req.user.totalScans,
+        threatsBlocked: req.user.threatsBlocked
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/user/profile-picture', authenticate, async (req, res) => {
+  try {
+    const { profilePicture } = req.body;
+    
+    if (!profilePicture) {
+      return res.status(400).json({ success: false, error: 'No image provided' });
+    }
+    
+    req.user.profilePicture = profilePicture;
+    await req.user.save();
+    
+    res.json({ success: true, message: 'Profile picture updated successfully' });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/user/profile-picture', authenticate, async (req, res) => {
+  try {
+    res.json({ 
+      success: true, 
+      profilePicture: req.user.profilePicture || null 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Forgot Password
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email required' });
+    }
+    
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Email not found' });
+    }
+    
+    const resetToken = jwt.sign(
+      { userId: user._id, type: 'password-reset' }, 
+      process.env.JWT_SECRET, 
+      { expiresIn: '1h' }
+    );
+    
+    console.log(`🔐 Password reset token for ${email}: ${resetToken}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'If your email is registered, you will receive a password reset link.' 
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 });
 
 // ==================== SCAN ROUTES ====================
@@ -283,7 +460,6 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
       });
       await scan.save();
       
-      // Update user stats
       await User.findByIdAndUpdate(req.user._id, {
         $inc: { totalScans: 1, threatsBlocked: result.isPhishing ? 1 : 0 }
       });
@@ -294,8 +470,6 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// ==================== HISTORY ROUTES ====================
 
 app.get('/api/history', verifyApiKey, async (req, res) => {
   try {
@@ -321,7 +495,7 @@ app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
   }
 });
 
-// ==================== LEADERBOARD ROUTES ====================
+// ==================== LEADERBOARD ====================
 
 app.get('/api/leaderboard', async (req, res) => {
   try {
@@ -339,15 +513,6 @@ app.get('/api/leaderboard', async (req, res) => {
     
     const ranked = leaderboard.map((user, i) => ({ rank: i + 1, ...user.toObject() }));
     res.json({ success: true, leaderboard: ranked });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/leaderboard/rank', authenticate, async (req, res) => {
-  try {
-    const count = await User.countDocuments({ role: 'user', xp: { $gt: req.user.xp } });
-    res.json({ success: true, rank: count + 1 });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -379,12 +544,7 @@ app.get('/api/threats/stats', async (req, res) => {
     const stats = {
       totalReports: await Report.countDocuments(),
       verifiedThreats: await Report.countDocuments({ status: 'verified' }),
-      pendingReports: await Report.countDocuments({ status: 'pending' }),
-      topReporters: await Report.aggregate([
-        { $group: { _id: '$reporterId', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 5 }
-      ])
+      pendingReports: await Report.countDocuments({ status: 'pending' })
     };
     res.json({ success: true, stats });
   } catch (error) {
@@ -426,141 +586,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-
-// Change from port 587 to 2525
-const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 2525,  // ← Change this from 587 to 2525
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
-
-// ==================== UPDATE USER PROFILE ====================
-
-// Update username
-app.put('/api/user/username', authenticate, async (req, res) => {
-    try {
-        const { newUsername } = req.body;
-        
-        if (!newUsername || newUsername.length < 3) {
-            return res.status(400).json({ error: 'Username must be at least 3 characters' });
-        }
-        
-        // Check if username already taken
-        const existingUser = await User.findOne({ username: newUsername, _id: { $ne: req.user._id } });
-        if (existingUser) {
-            return res.status(400).json({ error: 'Username already taken' });
-        }
-        
-        req.user.username = newUsername;
-        await req.user.save();
-        
-        res.json({ success: true, username: newUsername });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Update password
-app.put('/api/user/password', authenticate, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        
-        // Verify current password
-        const isValid = await req.user.comparePassword(currentPassword);
-        if (!isValid) {
-            return res.status(401).json({ error: 'Current password is incorrect' });
-        }
-        
-        if (!newPassword || newPassword.length < 6) {
-            return res.status(400).json({ error: 'Password must be at least 6 characters' });
-        }
-        
-        req.user.password = newPassword;
-        await req.user.save();
-        
-        res.json({ success: true, message: 'Password updated successfully' });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Update user stats (XP, Level)
-app.put('/api/user/stats', authenticate, async (req, res) => {
-    try {
-        const { xp, level, totalScans, threatsBlocked } = req.body;
-        
-        if (xp !== undefined) req.user.xp = xp;
-        if (level !== undefined) req.user.level = level;
-        if (totalScans !== undefined) req.user.totalScans = totalScans;
-        if (threatsBlocked !== undefined) req.user.threatsBlocked = threatsBlocked;
-        
-        await req.user.save();
-        
-        res.json({ 
-            success: true, 
-            user: {
-                username: req.user.username,
-                email: req.user.email,
-                level: req.user.level,
-                xp: req.user.xp,
-                totalScans: req.user.totalScans,
-                threatsBlocked: req.user.threatsBlocked
-            }
-        });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get user profile (with stats)
-app.get('/api/user/profile', authenticate, async (req, res) => {
-    try {
-        res.json({
-            success: true,
-            user: {
-                id: req.user._id,
-                username: req.user.username,
-                email: req.user.email,
-                level: req.user.level,
-                xp: req.user.xp,
-                totalScans: req.user.totalScans,
-                threatsBlocked: req.user.threatsBlocked,
-                reportsSubmitted: req.user.reportsSubmitted,
-                createdAt: req.user.createdAt
-            }
-        });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Update profile picture (store base64 or URL)
-app.put('/api/user/profile-picture', authenticate, async (req, res) => {
-    try {
-        const { profilePicture } = req.body;
-        
-        // Store base64 image (max 2MB)
-        if (profilePicture && profilePicture.length < 2 * 1024 * 1024) {
-            req.user.profilePicture = profilePicture;
-            await req.user.save();
-            res.json({ success: true, message: 'Profile picture updated' });
-        } else {
-            res.status(400).json({ error: 'Image too large or invalid' });
-        }
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // ==================== START SERVER ====================
 
 const PORT = process.env.PORT || 3000;
@@ -568,28 +593,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 Health: http://localhost:${PORT}/health`);
   console.log(`🔐 Auth: POST /api/auth/register, /api/auth/login`);
+  console.log(`👤 Profile: GET /api/user/profile`);
   console.log(`🔍 Scan: POST /api/scan`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
-});
-
-app.post('/api/auth/forgot-password', async (req, res) => {
-    try {
-        const { email } = req.body;
-        const user = await User.findOne({ email });
-        
-        if (!user) {
-            return res.status(404).json({ success: false, message: 'Email not found' });
-        }
-        
-        // Generate reset token
-        const resetToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        
-        // In production, send email here
-        console.log(`Password reset token for ${email}: ${resetToken}`);
-        
-        res.json({ success: true, message: 'Reset link sent to email' });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
 });
