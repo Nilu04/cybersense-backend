@@ -1,13 +1,15 @@
 const express = require('express');
 const router = express.Router();
 
-// Simple placeholder - you can expand later
-router.post('/register', (req, res) => {
-    res.json({ message: 'Register endpoint - to be implemented' });
-});
+const authController = require('../controllers/authController');
+const { authenticate } = require('../middleware/auth');
 
-router.post('/login', (req, res) => {
-    res.json({ message: 'Login endpoint - to be implemented' });
-});
+// Auth routes
+router.post('/register', authController.register);
+router.post('/login', authController.login);
+
+// Protected routes
+router.get('/profile', authenticate, authController.getProfile);
+router.put('/profile', authenticate, authController.updateProfile);
 
 module.exports = router;

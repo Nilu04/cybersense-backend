@@ -1,24 +1,58 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ MongoDB Connected Successfully'))
-  .catch(err => console.error('❌ MongoDB Connection Error:', err.message));
+  .then(() => console.log('✅ MongoDB Connected'))
+  .catch(err => console.error('❌ MongoDB Error:', err));
 
-// Scan Schema
+// ==================== MODELS ====================
+
+// User Model
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  apiKey: { type: String, unique: true },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  level: { type: Number, default: 1 },
+  xp: { type: Number, default: 0 },
+  totalScans: { type: Number, default: 0 },
+  threatsBlocked: { type: Number, default: 0 },
+  reportsSubmitted: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  lastLogin: Date
+});
+
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 10);
+  next();
+});
+
+userSchema.methods.comparePassword = async function(candidate) {
+  return await bcrypt.compare(candidate, this.password);
+};
+
+const User = mongoose.model('User', userSchema);
+
+// Scan History Model
 const scanSchema = new mongoose.Schema({
-  url: String,
-  isPhishing: Boolean,
-  riskScore: Number,
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  url: { type: String, required: true },
+  isPhishing: { type: Boolean, default: false },
+  riskScore: { type: Number, min: 0, max: 100 },
   reasons: [String],
   suspiciousKeywords: [String],
   suspiciousPatterns: [String],
@@ -27,9 +61,79 @@ const scanSchema = new mongoose.Schema({
   scannedAt: { type: Date, default: Date.now }
 });
 
-const Scan = mongoose.model('Scan', scanSchema);
+const ScanHistory = mongoose.model('ScanHistory', scanSchema);
 
-// Suspicious patterns
+// Report Model
+const reportSchema = new mongoose.Schema({
+  url: { type: String, required: true },
+  reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  reason: { type: String, enum: ['phishing', 'malware', 'scam', 'other'], default: 'phishing' },
+  description: String,
+  status: { type: String, enum: ['pending', 'verified', 'rejected'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Report = mongoose.model('Report', reportSchema);
+
+// Notification Model
+const notificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title: String,
+  message: String,
+  type: { type: String, enum: ['alert', 'info', 'achievement'], default: 'info' },
+  isRead: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Notification = mongoose.model('Notification', notificationSchema);
+
+// ==================== MIDDLEWARE ====================
+
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+app.use(morgan('combined'));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests' }
+});
+app.use(limiter);
+
+// Auth middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) throw new Error();
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) throw new Error();
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Please authenticate' });
+  }
+};
+
+const verifyApiKey = async (req, res, next) => {
+  const apiKey = req.header('X-API-Key');
+  if (!apiKey) return res.status(401).json({ error: 'API key required' });
+  
+  if (apiKey === process.env.MASTER_API_KEY) {
+    req.isMasterKey = true;
+    return next();
+  }
+  
+  const user = await User.findOne({ apiKey });
+  if (!user) return res.status(401).json({ error: 'Invalid API key' });
+  req.user = user;
+  next();
+};
+
+// ==================== SUSPICIOUS PATTERNS ====================
+
 const suspiciousKeywords = [
   'secure', 'verify', 'account', 'login', 'update', 'confirm',
   'alert', 'suspicious', 'unusual', 'urgent', 'paypal',
@@ -41,140 +145,293 @@ const suspiciousDomains = [
   '.xyz', '.top', '.club', '.work', '.click', '.tk', '.ml'
 ];
 
-// ROOT ROUTE - Fixes "Cannot GET /"
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'CyberSenseAI API is running!',
-        version: '1.0.0',
-        endpoints: {
-            health: 'GET /health',
-            scan: 'POST /api/scan',
-            history: 'GET /api/history'
-        }
-    });
-});
+// ==================== SCAN SERVICE ====================
 
-// Health check
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        message: 'CyberSenseAI API is running',
-        timestamp: new Date().toISOString(),
-        mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
-    });
-});
+async function scanUrl(url) {
+  const lowerUrl = url.toLowerCase();
+  let riskScore = 0;
+  const reasons = [];
+  const suspiciousKeywordsFound = [];
+  const suspiciousPatternsFound = [];
+  let sslStatus = "unknown";
 
-// Scan API
-app.post('/api/scan', async (req, res) => {
+  for (const keyword of suspiciousKeywords) {
+    if (lowerUrl.includes(keyword)) {
+      suspiciousKeywordsFound.push(keyword);
+      reasons.push(`Contains suspicious keyword: ${keyword}`);
+      riskScore += 10;
+    }
+  }
+
+  for (const domain of suspiciousDomains) {
+    if (lowerUrl.includes(domain)) {
+      suspiciousPatternsFound.push(domain);
+      reasons.push(`Suspicious domain pattern: ${domain}`);
+      riskScore += 20;
+    }
+  }
+
+  if (lowerUrl.startsWith('http://')) {
+    sslStatus = "insecure";
+    reasons.push('Uses HTTP (not secure)');
+    riskScore += 15;
+  } else if (lowerUrl.startsWith('https://')) {
+    sslStatus = "secure";
+  }
+
+  const ipMatch = lowerUrl.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+  if (ipMatch) {
+    suspiciousPatternsFound.push(`IP: ${ipMatch[0]}`);
+    reasons.push('Uses IP address instead of domain');
+    riskScore += 25;
+  }
+
+  riskScore = Math.min(riskScore, 100);
+  const isPhishing = riskScore >= 50;
+
+  let recommendations = [];
+  if (riskScore >= 70) {
+    recommendations = ["🚨 DO NOT proceed", "📢 Report this URL", "🔐 Never enter personal information"];
+  } else if (riskScore >= 30) {
+    recommendations = ["⚠️ Be cautious", "🔍 Verify through official channels", "❌ Don't click suspicious links"];
+  } else {
+    recommendations = ["✅ Website appears safe", "🛡️ Keep browser updated"];
+  }
+
+  return {
+    isPhishing, riskScore, reasons,
+    suspiciousKeywords: suspiciousKeywordsFound,
+    suspiciousPatterns: suspiciousPatternsFound,
+    sslStatus, recommendations
+  };
+}
+
+// ==================== AUTH ROUTES ====================
+
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { url } = req.body;
-    const apiKey = req.headers['x-api-key'];
+    const { username, email, password } = req.body;
     
-    if (apiKey !== process.env.MASTER_API_KEY) {
-      return res.status(401).json({ error: 'Invalid API key' });
-    }
+    const existing = await User.findOne({ $or: [{ email }, { username }] });
+    if (existing) return res.status(400).json({ error: 'User already exists' });
     
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
+    const user = new User({ username, email, password });
+    user.apiKey = 'cyber_' + Math.random().toString(36).substring(2, 15);
+    await user.save();
     
-    const lowerUrl = url.toLowerCase();
-    let riskScore = 0;
-    const reasons = [];
-    const suspiciousKeywordsFound = [];
-    const suspiciousPatternsFound = [];
-    let sslStatus = "unknown";
-    
-    for (const keyword of suspiciousKeywords) {
-      if (lowerUrl.includes(keyword)) {
-        suspiciousKeywordsFound.push(keyword);
-        reasons.push(`Contains suspicious keyword: ${keyword}`);
-        riskScore += 10;
-      }
-    }
-    
-    for (const domain of suspiciousDomains) {
-      if (lowerUrl.includes(domain)) {
-        suspiciousPatternsFound.push(domain);
-        reasons.push(`Suspicious domain pattern: ${domain}`);
-        riskScore += 20;
-      }
-    }
-    
-    if (lowerUrl.startsWith('http://')) {
-      sslStatus = "insecure";
-      reasons.push('Uses HTTP (not secure)');
-      riskScore += 15;
-    } else if (lowerUrl.startsWith('https://')) {
-      sslStatus = "secure";
-    }
-    
-    riskScore = Math.min(riskScore, 100);
-    const isPhishing = riskScore >= 50;
-    
-    let recommendations = [];
-    if (riskScore >= 70) {
-      recommendations = [
-        "🚨 DO NOT proceed",
-        "📢 Report this URL",
-        "🔐 Never enter personal information"
-      ];
-    } else if (riskScore >= 30) {
-      recommendations = [
-        "⚠️ Be extremely cautious",
-        "🔍 Verify through official channels",
-        "❌ Don't click on suspicious links"
-      ];
-    } else {
-      recommendations = [
-        "✅ Website appears safe",
-        "🛡️ Keep browser updated"
-      ];
-    }
-    
-    const scan = new Scan({
-      url, isPhishing, riskScore, reasons,
-      suspiciousKeywords: suspiciousKeywordsFound,
-      suspiciousPatterns: suspiciousPatternsFound,
-      sslStatus, recommendations
-    });
-    await scan.save();
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
     res.json({
       success: true,
-      url,
-      isPhishing,
-      riskScore,
-      reasons,
-      suspiciousKeywords: suspiciousKeywordsFound,
-      suspiciousPatterns: suspiciousPatternsFound,
-      sslStatus,
-      recommendations,
-      timestamp: new Date().toISOString()
+      token,
+      user: { id: user._id, username, email, apiKey: user.apiKey, level: 1, xp: 0 }
     });
-    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get history
-app.get('/api/history', async (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
-    const apiKey = req.headers['x-api-key'];
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     
-    if (apiKey !== process.env.MASTER_API_KEY) {
-      return res.status(401).json({ error: 'Invalid API key' });
+    const isValid = await user.comparePassword(password);
+    if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    user.lastLogin = new Date();
+    await user.save();
+    
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    
+    res.json({
+      success: true,
+      token,
+      user: { id: user._id, username: user.username, email: user.email, apiKey: user.apiKey, level: user.level, xp: user.xp }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/auth/profile', authenticate, async (req, res) => {
+  res.json({ success: true, user: req.user });
+});
+
+// ==================== SCAN ROUTES ====================
+
+app.post('/api/scan', verifyApiKey, async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL required' });
+    
+    const result = await scanUrl(url);
+    
+    if (req.user) {
+      const scan = new ScanHistory({
+        userId: req.user._id,
+        url,
+        isPhishing: result.isPhishing,
+        riskScore: result.riskScore,
+        reasons: result.reasons,
+        suspiciousKeywords: result.suspiciousKeywords,
+        suspiciousPatterns: result.suspiciousPatterns,
+        sslStatus: result.sslStatus,
+        recommendations: result.recommendations
+      });
+      await scan.save();
+      
+      // Update user stats
+      await User.findByIdAndUpdate(req.user._id, {
+        $inc: { totalScans: 1, threatsBlocked: result.isPhishing ? 1 : 0 }
+      });
     }
     
-    const scans = await Scan.find().sort({ scannedAt: -1 }).limit(100);
+    res.json({ success: true, ...result, url, timestamp: new Date() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== HISTORY ROUTES ====================
+
+app.get('/api/history', verifyApiKey, async (req, res) => {
+  try {
+    const scans = await ScanHistory.find({ userId: req.user._id })
+      .sort({ scannedAt: -1 })
+      .limit(100);
     res.json({ success: true, history: scans });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
+  try {
+    if (req.params.id === 'all') {
+      await ScanHistory.deleteMany({ userId: req.user._id });
+    } else {
+      await ScanHistory.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== LEADERBOARD ROUTES ====================
+
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const { type = 'xp', limit = 20 } = req.query;
+    
+    let sortField = {};
+    if (type === 'xp') sortField = { xp: -1 };
+    else if (type === 'scans') sortField = { totalScans: -1 };
+    else if (type === 'threats') sortField = { threatsBlocked: -1 };
+    
+    const leaderboard = await User.find({ role: 'user' })
+      .select('username xp level totalScans threatsBlocked')
+      .sort(sortField)
+      .limit(parseInt(limit));
+    
+    const ranked = leaderboard.map((user, i) => ({ rank: i + 1, ...user.toObject() }));
+    res.json({ success: true, leaderboard: ranked });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/leaderboard/rank', authenticate, async (req, res) => {
+  try {
+    const count = await User.countDocuments({ role: 'user', xp: { $gt: req.user.xp } });
+    res.json({ success: true, rank: count + 1 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== THREAT ROUTES ====================
+
+app.post('/api/threats/report', authenticate, async (req, res) => {
+  try {
+    const { url, reason, description } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL required' });
+    
+    const existing = await Report.findOne({ url, reporterId: req.user._id });
+    if (existing) return res.status(400).json({ error: 'Already reported' });
+    
+    const report = new Report({ url, reporterId: req.user._id, reason, description });
+    await report.save();
+    
+    await User.findByIdAndUpdate(req.user._id, { $inc: { reportsSubmitted: 1, xp: 5 } });
+    
+    res.json({ success: true, message: 'Report submitted', report });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/threats/stats', async (req, res) => {
+  try {
+    const stats = {
+      totalReports: await Report.countDocuments(),
+      verifiedThreats: await Report.countDocuments({ status: 'verified' }),
+      pendingReports: await Report.countDocuments({ status: 'pending' }),
+      topReporters: await Report.aggregate([
+        { $group: { _id: '$reporterId', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 }
+      ])
+    };
+    res.json({ success: true, stats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOTIFICATION ROUTES ====================
+
+app.get('/api/notifications', authenticate, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
+    res.json({ success: true, notifications, unreadCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
+  try {
+    await Notification.findOneAndUpdate({ _id: req.params.id, userId: req.user._id }, { isRead: true });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== HEALTH CHECK ====================
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    timestamp: new Date(),
+    mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
+    version: '2.0.0'
+  });
+});
+
+// ==================== START SERVER ====================
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📡 Health: http://localhost:${PORT}/health`);
+  console.log(`🔐 Auth: POST /api/auth/register, /api/auth/login`);
+  console.log(`🔍 Scan: POST /api/scan`);
+  console.log(`📊 Leaderboard: GET /api/leaderboard`);
 });
