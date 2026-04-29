@@ -21,18 +21,19 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // User Model
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  apiKey: { type: String, unique: true },
-  role: { type: String, enum: ['user', 'admin'], default: 'user' },
-  level: { type: Number, default: 1 },
-  xp: { type: Number, default: 0 },
-  totalScans: { type: Number, default: 0 },
-  threatsBlocked: { type: Number, default: 0 },
-  reportsSubmitted: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now },
-  lastLogin: Date
+    username: { type: String, required: true, unique: true },
+    email: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    apiKey: { type: String, unique: true },
+    profilePicture: { type: String, default: null }, // NEW: store base64 image
+    role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    level: { type: Number, default: 1 },
+    xp: { type: Number, default: 0 },
+    totalScans: { type: Number, default: 0 },
+    threatsBlocked: { type: Number, default: 0 },
+    reportsSubmitted: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+    lastLogin: Date
 });
 
 userSchema.pre('save', async function(next) {
@@ -423,6 +424,141 @@ app.get('/health', (req, res) => {
     mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
     version: '2.0.0'
   });
+});
+
+
+// Change from port 587 to 2525
+const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 2525,  // ← Change this from 587 to 2525
+    secure: false,
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// ==================== UPDATE USER PROFILE ====================
+
+// Update username
+app.put('/api/user/username', authenticate, async (req, res) => {
+    try {
+        const { newUsername } = req.body;
+        
+        if (!newUsername || newUsername.length < 3) {
+            return res.status(400).json({ error: 'Username must be at least 3 characters' });
+        }
+        
+        // Check if username already taken
+        const existingUser = await User.findOne({ username: newUsername, _id: { $ne: req.user._id } });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Username already taken' });
+        }
+        
+        req.user.username = newUsername;
+        await req.user.save();
+        
+        res.json({ success: true, username: newUsername });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update password
+app.put('/api/user/password', authenticate, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        
+        // Verify current password
+        const isValid = await req.user.comparePassword(currentPassword);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+        
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+        
+        req.user.password = newPassword;
+        await req.user.save();
+        
+        res.json({ success: true, message: 'Password updated successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update user stats (XP, Level)
+app.put('/api/user/stats', authenticate, async (req, res) => {
+    try {
+        const { xp, level, totalScans, threatsBlocked } = req.body;
+        
+        if (xp !== undefined) req.user.xp = xp;
+        if (level !== undefined) req.user.level = level;
+        if (totalScans !== undefined) req.user.totalScans = totalScans;
+        if (threatsBlocked !== undefined) req.user.threatsBlocked = threatsBlocked;
+        
+        await req.user.save();
+        
+        res.json({ 
+            success: true, 
+            user: {
+                username: req.user.username,
+                email: req.user.email,
+                level: req.user.level,
+                xp: req.user.xp,
+                totalScans: req.user.totalScans,
+                threatsBlocked: req.user.threatsBlocked
+            }
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get user profile (with stats)
+app.get('/api/user/profile', authenticate, async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            user: {
+                id: req.user._id,
+                username: req.user.username,
+                email: req.user.email,
+                level: req.user.level,
+                xp: req.user.xp,
+                totalScans: req.user.totalScans,
+                threatsBlocked: req.user.threatsBlocked,
+                reportsSubmitted: req.user.reportsSubmitted,
+                createdAt: req.user.createdAt
+            }
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update profile picture (store base64 or URL)
+app.put('/api/user/profile-picture', authenticate, async (req, res) => {
+    try {
+        const { profilePicture } = req.body;
+        
+        // Store base64 image (max 2MB)
+        if (profilePicture && profilePicture.length < 2 * 1024 * 1024) {
+            req.user.profilePicture = profilePicture;
+            await req.user.save();
+            res.json({ success: true, message: 'Profile picture updated' });
+        } else {
+            res.status(400).json({ error: 'Image too large or invalid' });
+        }
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // ==================== START SERVER ====================
