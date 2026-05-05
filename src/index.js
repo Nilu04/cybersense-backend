@@ -88,6 +88,45 @@ const notificationSchema = new mongoose.Schema({
 
 const Notification = mongoose.model('Notification', notificationSchema);
 
+// Weekly Challenge Models
+const challengeSchema = new mongoose.Schema({
+  week: { type: Number, required: true, unique: true },
+  title: { type: String, required: true },
+  description: String,
+  questions: [{
+    id: Number,
+    text: String,
+    options: [String],
+    correctAnswer: Number,
+    explanation: String,
+    points: { type: Number, default: 10 }
+  }],
+  startDate: Date,
+  endDate: Date,
+  isActive: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Challenge = mongoose.model('Challenge', challengeSchema);
+
+const userChallengeSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  week: { type: Number, required: true },
+  score: { type: Number, default: 0 },
+  totalPoints: { type: Number, default: 0 },
+  answers: [{
+    questionId: Number,
+    selectedAnswer: Number,
+    isCorrect: Boolean,
+    answeredAt: Date
+  }],
+  completed: { type: Boolean, default: false },
+  completedAt: Date,
+  startedAt: { type: Date, default: Date.now }
+});
+
+const UserChallenge = mongoose.model('UserChallenge', userChallengeSchema);
+
 // ==================== MIDDLEWARE ====================
 
 app.use(helmet());
@@ -116,6 +155,13 @@ const authenticate = async (req, res, next) => {
   } catch (error) {
     res.status(401).json({ error: 'Please authenticate' });
   }
+};
+
+const requireAdmin = async (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
 };
 
 const verifyApiKey = async (req, res, next) => {
@@ -207,6 +253,103 @@ async function scanUrl(url) {
   };
 }
 
+// ==================== CREATE DEFAULT CHALLENGE ====================
+
+async function createDefaultChallenge() {
+  try {
+    const existing = await Challenge.findOne({ week: 1 });
+    if (existing) {
+      console.log('✅ Default challenge already exists');
+      return existing;
+    }
+    
+    const defaultChallenge = {
+      week: 1,
+      title: "Cybersecurity Basics",
+      description: "Test your knowledge about phishing and cybersecurity",
+      startDate: new Date(),
+      endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      isActive: true,
+      questions: [
+        {
+          id: 1,
+          text: "What is phishing?",
+          options: [
+            "A type of fishing",
+            "A cyber attack where attackers trick you into revealing sensitive information",
+            "A security software",
+            "A network protocol"
+          ],
+          correctAnswer: 1,
+          points: 10,
+          explanation: "Phishing is a cyber attack where criminals create fake websites or emails to steal your personal information."
+        },
+        {
+          id: 2,
+          text: "What is a common sign of a phishing email?",
+          options: [
+            "Professional grammar",
+            "Urgent language threatening account closure",
+            "Correct sender email address",
+            "Personalized greeting with your name"
+          ],
+          correctAnswer: 1,
+          points: 10,
+          explanation: "Phishing emails often use urgent language like 'Your account will be closed!' to make you act without thinking."
+        },
+        {
+          id: 3,
+          text: "What does HTTPS indicate?",
+          options: [
+            "The website is secure and encrypted",
+            "The website is from India",
+            "The website is slow",
+            "The website is fake"
+          ],
+          correctAnswer: 0,
+          points: 10,
+          explanation: "HTTPS indicates the connection is encrypted and secure. Always look for the padlock icon."
+        },
+        {
+          id: 4,
+          text: "What should you do if you receive a suspicious link?",
+          options: [
+            "Click it immediately to check",
+            "Share it with friends",
+            "Scan it using CyberSenseAI first",
+            "Ignore it completely"
+          ],
+          correctAnswer: 2,
+          points: 10,
+          explanation: "Always scan suspicious links using CyberSenseAI before clicking them."
+        },
+        {
+          id: 5,
+          text: "What is Two-Factor Authentication (2FA)?",
+          options: [
+            "Two different passwords",
+            "An extra security layer requiring a second verification method",
+            "Two different accounts",
+            "A type of computer virus"
+          ],
+          correctAnswer: 1,
+          points: 10,
+          explanation: "2FA adds an extra layer of security by requiring a second verification method like a code from your phone."
+        }
+      ]
+    };
+    
+    const challenge = new Challenge(defaultChallenge);
+    await challenge.save();
+    console.log('✅ Default challenge created successfully!');
+    return challenge;
+    
+  } catch (error) {
+    console.error('Error creating default challenge:', error);
+    return null;
+  }
+}
+
 // ==================== AUTH ROUTES ====================
 
 app.post('/api/auth/register', async (req, res) => {
@@ -274,6 +417,31 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email required' });
+    
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ success: false, message: 'Email not found' });
+    
+    const resetToken = jwt.sign(
+      { userId: user._id, type: 'password-reset' }, 
+      process.env.JWT_SECRET, 
+      { expiresIn: '1h' }
+    );
+    
+    console.log(`🔐 Password reset token for ${email}: ${resetToken}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'If your email is registered, you will receive a password reset link.' 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== USER PROFILE ROUTES ====================
 
 app.get('/api/user/profile', authenticate, async (req, res) => {
@@ -301,25 +469,18 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
 app.put('/api/user/username', authenticate, async (req, res) => {
   try {
     const { newUsername } = req.body;
-    
     if (!newUsername || newUsername.length < 3) {
       return res.status(400).json({ success: false, error: 'Username must be at least 3 characters' });
     }
     
-    const existingUser = await User.findOne({ 
-      username: newUsername, 
-      _id: { $ne: req.user._id } 
-    });
-    
+    const existingUser = await User.findOne({ username: newUsername, _id: { $ne: req.user._id } });
     if (existingUser) {
       return res.status(400).json({ success: false, error: 'Username already taken' });
     }
     
     req.user.username = newUsername;
     await req.user.save();
-    
     res.json({ success: true, username: newUsername, message: 'Username updated successfully' });
-    
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -328,112 +489,30 @@ app.put('/api/user/username', authenticate, async (req, res) => {
 app.put('/api/user/password', authenticate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    
     const isValid = await req.user.comparePassword(currentPassword);
-    if (!isValid) {
-      return res.status(401).json({ success: false, error: 'Current password is incorrect' });
-    }
-    
+    if (!isValid) return res.status(401).json({ success: false, error: 'Current password is incorrect' });
     if (!newPassword || newPassword.length < 6) {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
     
     req.user.password = newPassword;
     await req.user.save();
-    
     res.json({ success: true, message: 'Password updated successfully' });
-    
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.put('/api/user/stats', authenticate, async (req, res) => {
-  try {
-    const { xp, level, totalScans, threatsBlocked } = req.body;
-    
-    if (xp !== undefined) req.user.xp = xp;
-    if (level !== undefined) req.user.level = level;
-    if (totalScans !== undefined) req.user.totalScans = totalScans;
-    if (threatsBlocked !== undefined) req.user.threatsBlocked = threatsBlocked;
-    
-    await req.user.save();
-    
-    res.json({ 
-      success: true, 
-      user: {
-        username: req.user.username,
-        email: req.user.email,
-        level: req.user.level,
-        xp: req.user.xp,
-        totalScans: req.user.totalScans,
-        threatsBlocked: req.user.threatsBlocked
-      }
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
 });
 
 app.put('/api/user/profile-picture', authenticate, async (req, res) => {
   try {
     const { profilePicture } = req.body;
-    
-    if (!profilePicture) {
-      return res.status(400).json({ success: false, error: 'No image provided' });
-    }
+    if (!profilePicture) return res.status(400).json({ success: false, error: 'No image provided' });
     
     req.user.profilePicture = profilePicture;
     await req.user.save();
-    
     res.json({ success: true, message: 'Profile picture updated successfully' });
-    
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/user/profile-picture', authenticate, async (req, res) => {
-  try {
-    res.json({ 
-      success: true, 
-      profilePicture: req.user.profilePicture || null 
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Forgot Password
-app.post('/api/auth/forgot-password', async (req, res) => {
-  try {
-    const { email } = req.body;
-    
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Email required' });
-    }
-    
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Email not found' });
-    }
-    
-    const resetToken = jwt.sign(
-      { userId: user._id, type: 'password-reset' }, 
-      process.env.JWT_SECRET, 
-      { expiresIn: '1h' }
-    );
-    
-    console.log(`🔐 Password reset token for ${email}: ${resetToken}`);
-    
-    res.json({ 
-      success: true, 
-      message: 'If your email is registered, you will receive a password reset link.' 
-    });
-    
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -500,7 +579,6 @@ app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
 app.get('/api/leaderboard', async (req, res) => {
   try {
     const { type = 'xp', limit = 20 } = req.query;
-    
     let sortField = {};
     if (type === 'xp') sortField = { xp: -1 };
     else if (type === 'scans') sortField = { totalScans: -1 };
@@ -530,7 +608,6 @@ app.post('/api/threats/report', authenticate, async (req, res) => {
     
     const report = new Report({ url, reporterId: req.user._id, reason, description });
     await report.save();
-    
     await User.findByIdAndUpdate(req.user._id, { $inc: { reportsSubmitted: 1, xp: 5 } });
     
     res.json({ success: true, message: 'Report submitted', report });
@@ -552,24 +629,131 @@ app.get('/api/threats/stats', async (req, res) => {
   }
 });
 
-// ==================== NOTIFICATION ROUTES ====================
+// ==================== WEEKLY CHALLENGE ROUTES ====================
 
-app.get('/api/notifications', authenticate, async (req, res) => {
+app.get('/api/challenge/current', authenticate, async (req, res) => {
   try {
-    const notifications = await Notification.find({ userId: req.user._id })
-      .sort({ createdAt: -1 })
-      .limit(50);
-    const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
-    res.json({ success: true, notifications, unreadCount });
+    const today = new Date();
+    let challenge = await Challenge.findOne({ 
+      isActive: true,
+      startDate: { $lte: today },
+      endDate: { $gte: today }
+    });
+    
+    if (!challenge) {
+      console.log('No active challenge found, creating default challenge...');
+      challenge = await createDefaultChallenge();
+    }
+    
+    if (!challenge) {
+      return res.json({ success: true, hasChallenge: false, message: 'No active challenge available' });
+    }
+    
+    const userProgress = await UserChallenge.findOne({ userId: req.user._id, week: challenge.week });
+    
+    res.json({
+      success: true,
+      hasChallenge: true,
+      challenge: {
+        id: challenge._id,
+        week: challenge.week,
+        title: challenge.title,
+        description: challenge.description,
+        questions: challenge.questions.map(q => ({
+          id: q.id,
+          text: q.text,
+          options: q.options,
+          points: q.points
+        })),
+        totalPoints: challenge.questions.reduce((sum, q) => sum + q.points, 0),
+        startDate: challenge.startDate,
+        endDate: challenge.endDate
+      },
+      userProgress: userProgress || null
+    });
+  } catch (error) {
+    console.error('Challenge error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/challenge/submit', authenticate, async (req, res) => {
+  try {
+    const { week, questionId, selectedAnswer } = req.body;
+    
+    const challenge = await Challenge.findOne({ week, isActive: true });
+    if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
+    
+    const question = challenge.questions.find(q => q.id === questionId);
+    if (!question) return res.status(404).json({ error: 'Question not found' });
+    
+    let userProgress = await UserChallenge.findOne({ userId: req.user._id, week: challenge.week });
+    if (!userProgress) {
+      userProgress = new UserChallenge({
+        userId: req.user._id,
+        week: challenge.week,
+        answers: [],
+        score: 0,
+        totalPoints: 0
+      });
+    }
+    
+    const existingAnswer = userProgress.answers.find(a => a.questionId === questionId);
+    if (existingAnswer) return res.status(400).json({ error: 'Question already answered' });
+    
+    const isCorrect = selectedAnswer === question.correctAnswer;
+    const pointsEarned = isCorrect ? question.points : 0;
+    
+    userProgress.answers.push({
+      questionId,
+      selectedAnswer,
+      isCorrect,
+      answeredAt: new Date()
+    });
+    
+    userProgress.score += pointsEarned;
+    userProgress.totalPoints += pointsEarned;
+    
+    if (userProgress.answers.length === challenge.questions.length) {
+      userProgress.completed = true;
+      userProgress.completedAt = new Date();
+      await User.findByIdAndUpdate(req.user._id, { $inc: { xp: userProgress.score, totalScans: 1 } });
+    }
+    
+    await userProgress.save();
+    
+    res.json({
+      success: true,
+      isCorrect,
+      pointsEarned,
+      correctAnswer: isCorrect ? null : question.correctAnswer,
+      explanation: isCorrect ? null : question.explanation,
+      totalScore: userProgress.score,
+      totalPoints: userProgress.totalPoints,
+      completed: userProgress.completed
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
+app.get('/api/challenge/leaderboard/:week', async (req, res) => {
   try {
-    await Notification.findOneAndUpdate({ _id: req.params.id, userId: req.user._id }, { isRead: true });
-    res.json({ success: true });
+    const { week } = req.params;
+    const leaderboard = await UserChallenge.find({ week, completed: true })
+      .sort({ score: -1, completedAt: 1 })
+      .limit(50)
+      .populate('userId', 'username xp level');
+    
+    res.json({
+      success: true,
+      leaderboard: leaderboard.map((entry, index) => ({
+        rank: index + 1,
+        username: entry.userId.username,
+        score: entry.score,
+        completedAt: entry.completedAt
+      }))
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -596,4 +780,5 @@ app.listen(PORT, () => {
   console.log(`👤 Profile: GET /api/user/profile`);
   console.log(`🔍 Scan: POST /api/scan`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
+  console.log(`🏆 Challenge: GET /api/challenge/current`);
 });
