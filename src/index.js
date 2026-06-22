@@ -143,7 +143,55 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Auth middleware
+// ==================== ROOT ROUTE (Fixes "Cannot GET /") ====================
+app.get('/', (req, res) => {
+    res.json({
+        message: '🚀 CyberSenseAI API is running!',
+        version: '2.0.0',
+        status: 'OK',
+        timestamp: new Date().toISOString(),
+        mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
+        endpoints: {
+            health: 'GET /health',
+            auth: {
+                register: 'POST /api/auth/register',
+                login: 'POST /api/auth/login',
+                profile: 'GET /api/user/profile',
+                forgotPassword: 'POST /api/auth/forgot-password'
+            },
+            user: {
+                username: 'PUT /api/user/username',
+                password: 'PUT /api/user/password',
+                profilePicture: 'PUT /api/user/profile-picture'
+            },
+            scan: {
+                scan: 'POST /api/scan',
+                history: 'GET /api/history',
+                deleteHistory: 'DELETE /api/history/:id'
+            },
+            leaderboard: {
+                global: 'GET /api/leaderboard',
+                rank: 'GET /api/leaderboard/rank'
+            },
+            threats: {
+                report: 'POST /api/threats/report',
+                stats: 'GET /api/threats/stats'
+            },
+            challenge: {
+                current: 'GET /api/challenge/current',
+                submit: 'POST /api/challenge/submit',
+                leaderboard: 'GET /api/challenge/leaderboard/:week'
+            },
+            notifications: {
+                list: 'GET /api/notifications',
+                markRead: 'PUT /api/notifications/:id/read'
+            }
+        }
+    });
+});
+
+// ==================== AUTH MIDDLEWARE ====================
+
 const authenticate = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -626,6 +674,29 @@ app.get('/api/threats/stats', async (req, res) => {
       pendingReports: await Report.countDocuments({ status: 'pending' })
     };
     res.json({ success: true, stats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOTIFICATION ROUTES ====================
+
+app.get('/api/notifications', authenticate, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
+    res.json({ success: true, notifications, unreadCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
+  try {
+    await Notification.findOneAndUpdate({ _id: req.params.id, userId: req.user._id }, { isRead: true });
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
