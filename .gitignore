@@ -1,6 +1,14 @@
+<<<<<<< HEAD
 node_modules/
 .env
 .DS_Store
 *.log
 dist/
+=======
+node_modules/
+.env
+.DS_Store
+*.log
+dist/
+>>>>>>> 0976c5a6d1b76355f6230aea4b958c98807aae51
 build/
