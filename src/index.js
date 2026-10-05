@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -1792,5 +1792,5 @@ app.listen(PORT, () => {
   console.log(`📜 History: GET /api/history`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
   console.log(`🏆 Challenge: GET /api/challenge/current`);
->>>>>>> 0976c5a6d1b76355f6230aea4b958c98807aae51
+
 });
