@@ -12,8 +12,7 @@ dotenv.config();
 
 const app = express();
 
-// ==================== MongoDB Connection ====================
-
+// MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.error('❌ MongoDB Error:', err));
@@ -143,55 +142,18 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// ==================== ROOT ROUTE (Fixes "Cannot GET /") ====================
+// ==================== ROOT ROUTE ====================
 app.get('/', (req, res) => {
-    res.json({
-        message: '🚀 CyberSenseAI API is running!',
-        version: '2.0.0',
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-        endpoints: {
-            health: 'GET /health',
-            auth: {
-                register: 'POST /api/auth/register',
-                login: 'POST /api/auth/login',
-                profile: 'GET /api/user/profile',
-                forgotPassword: 'POST /api/auth/forgot-password'
-            },
-            user: {
-                username: 'PUT /api/user/username',
-                password: 'PUT /api/user/password',
-                profilePicture: 'PUT /api/user/profile-picture'
-            },
-            scan: {
-                scan: 'POST /api/scan',
-                history: 'GET /api/history',
-                deleteHistory: 'DELETE /api/history/:id'
-            },
-            leaderboard: {
-                global: 'GET /api/leaderboard',
-                rank: 'GET /api/leaderboard/rank'
-            },
-            threats: {
-                report: 'POST /api/threats/report',
-                stats: 'GET /api/threats/stats'
-            },
-            challenge: {
-                current: 'GET /api/challenge/current',
-                submit: 'POST /api/challenge/submit',
-                leaderboard: 'GET /api/challenge/leaderboard/:week'
-            },
-            notifications: {
-                list: 'GET /api/notifications',
-                markRead: 'PUT /api/notifications/:id/read'
-            }
-        }
-    });
+  res.json({
+    message: '🚀 CyberSenseAI API is running!',
+    version: '2.0.0',
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
+  });
 });
 
-// ==================== AUTH MIDDLEWARE ====================
-
+// Auth middleware
 const authenticate = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -202,7 +164,6 @@ const authenticate = async (req, res, next) => {
     req.user = user;
     next();
   } catch (error) {
-    console.error('Auth error:', error.message);
     res.status(401).json({ error: 'Please authenticate' });
   }
 };
@@ -345,7 +306,7 @@ async function createDefaultChallenge() {
           ],
           correctAnswer: 1,
           points: 10,
-          explanation: "Phishing emails often use urgent language like 'Your account will be closed!' to make you act without thinking."
+          explanation: "Phishing emails often use urgent language like 'Your account will be closed!'"
         },
         {
           id: 3,
@@ -358,7 +319,7 @@ async function createDefaultChallenge() {
           ],
           correctAnswer: 0,
           points: 10,
-          explanation: "HTTPS indicates the connection is encrypted and secure. Always look for the padlock icon."
+          explanation: "HTTPS indicates the connection is encrypted and secure."
         },
         {
           id: 4,
@@ -384,7 +345,7 @@ async function createDefaultChallenge() {
           ],
           correctAnswer: 1,
           points: 10,
-          explanation: "2FA adds an extra layer of security by requiring a second verification method like a code from your phone."
+          explanation: "2FA adds an extra layer of security by requiring a second verification method."
         }
       ]
     };
@@ -600,23 +561,78 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
   }
 });
 
+// ==================== FIXED HISTORY ROUTE ====================
 app.get('/api/history', verifyApiKey, async (req, res) => {
   try {
-    const scans = await ScanHistory.find({ userId: req.user._id })
-      .sort({ scannedAt: -1 })
-      .limit(100);
-    res.json({ success: true, history: scans });
+    console.log('📜 History request');
+    console.log('   isMasterKey:', req.isMasterKey);
+    console.log('   user:', req.user?._id || 'none');
+    
+    let scans;
+    
+    if (req.isMasterKey) {
+      // Master key → return ALL scans
+      scans = await ScanHistory.find()
+        .sort({ scannedAt: -1 })
+        .limit(200);
+      console.log('   Returning ALL scans:', scans.length);
+    } else if (req.user) {
+      // User key → return only that user's scans
+      scans = await ScanHistory.find({ userId: req.user._id })
+        .sort({ scannedAt: -1 })
+        .limit(100);
+      console.log('   Returning user scans:', scans.length);
+    } else {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Convert to safe objects
+    const safeHistory = scans.map(scan => ({
+      _id: scan._id,
+      url: scan.url,
+      isPhishing: scan.isPhishing,
+      riskScore: scan.riskScore,
+      reasons: scan.reasons || [],
+      suspiciousKeywords: scan.suspiciousKeywords || [],
+      suspiciousPatterns: scan.suspiciousPatterns || [],
+      sslStatus: scan.sslStatus || 'unknown',
+      recommendations: scan.recommendations || [],
+      scannedAt: scan.scannedAt,
+      status: scan.riskScore >= 70 ? 'phishing' :
+              scan.riskScore >= 30 ? 'suspicious' : 'safe'
+    }));
+    
+    res.json({ 
+      success: true, 
+      history: safeHistory,
+      count: safeHistory.length 
+    });
+    
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ History error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
   }
 });
+// ==================== END HISTORY ROUTE ====================
 
 app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
   try {
     if (req.params.id === 'all') {
-      await ScanHistory.deleteMany({ userId: req.user._id });
+      if (req.isMasterKey) {
+        // Master key can delete all
+        await ScanHistory.deleteMany({});
+      } else if (req.user) {
+        await ScanHistory.deleteMany({ userId: req.user._id });
+      }
     } else {
-      await ScanHistory.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+      if (req.isMasterKey) {
+        await ScanHistory.findByIdAndDelete(req.params.id);
+      } else if (req.user) {
+        await ScanHistory.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+      }
     }
     res.json({ success: true });
   } catch (error) {
@@ -679,29 +695,6 @@ app.get('/api/threats/stats', async (req, res) => {
   }
 });
 
-// ==================== NOTIFICATION ROUTES ====================
-
-app.get('/api/notifications', authenticate, async (req, res) => {
-  try {
-    const notifications = await Notification.find({ userId: req.user._id })
-      .sort({ createdAt: -1 })
-      .limit(50);
-    const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
-    res.json({ success: true, notifications, unreadCount });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
-  try {
-    await Notification.findOneAndUpdate({ _id: req.params.id, userId: req.user._id }, { isRead: true });
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // ==================== WEEKLY CHALLENGE ROUTES ====================
 
 app.get('/api/challenge/current', authenticate, async (req, res) => {
@@ -754,23 +747,11 @@ app.post('/api/challenge/submit', authenticate, async (req, res) => {
   try {
     const { week, questionId, selectedAnswer } = req.body;
     
-    console.log(`📝 Submit: week=${week}, questionId=${questionId}, selectedAnswer=${selectedAnswer}`);
-    console.log(`👤 User: ${req.user.username} (${req.user._id})`);
-    
     const challenge = await Challenge.findOne({ week, isActive: true });
-    if (!challenge) {
-      console.log('❌ Challenge not found for week:', week);
-      return res.status(404).json({ error: 'Challenge not found' });
-    }
+    if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
     
     const question = challenge.questions.find(q => q.id === questionId);
-    if (!question) {
-      console.log('❌ Question not found:', questionId);
-      return res.status(404).json({ error: 'Question not found' });
-    }
-    
-    console.log(`📋 Question: ${question.text}`);
-    console.log(`✅ Correct answer: ${question.correctAnswer}`);
+    if (!question) return res.status(404).json({ error: 'Question not found' });
     
     let userProgress = await UserChallenge.findOne({ userId: req.user._id, week: challenge.week });
     if (!userProgress) {
@@ -784,15 +765,10 @@ app.post('/api/challenge/submit', authenticate, async (req, res) => {
     }
     
     const existingAnswer = userProgress.answers.find(a => a.questionId === questionId);
-    if (existingAnswer) {
-      console.log('⚠️ Question already answered');
-      return res.status(400).json({ error: 'Question already answered' });
-    }
+    if (existingAnswer) return res.status(400).json({ error: 'Question already answered' });
     
     const isCorrect = selectedAnswer === question.correctAnswer;
     const pointsEarned = isCorrect ? question.points : 0;
-    
-    console.log(`🎯 ${isCorrect ? '✅ Correct' : '❌ Wrong'} - Points: ${pointsEarned}`);
     
     userProgress.answers.push({
       questionId,
@@ -808,12 +784,9 @@ app.post('/api/challenge/submit', authenticate, async (req, res) => {
       userProgress.completed = true;
       userProgress.completedAt = new Date();
       await User.findByIdAndUpdate(req.user._id, { $inc: { xp: userProgress.score, totalScans: 1 } });
-      console.log('🎉 Challenge completed! Score:', userProgress.score);
     }
     
     await userProgress.save();
-    
-    console.log('✅ Answer saved successfully');
     
     res.json({
       success: true,
@@ -825,9 +798,7 @@ app.post('/api/challenge/submit', authenticate, async (req, res) => {
       totalPoints: userProgress.totalPoints,
       completed: userProgress.completed
     });
-    
   } catch (error) {
-    console.error('❌ Submit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -874,7 +845,7 @@ app.listen(PORT, () => {
   console.log(`🔐 Auth: POST /api/auth/register, /api/auth/login`);
   console.log(`👤 Profile: GET /api/user/profile`);
   console.log(`🔍 Scan: POST /api/scan`);
+  console.log(`📜 History: GET /api/history`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
   console.log(`🏆 Challenge: GET /api/challenge/current`);
-  console.log(`📝 Submit: POST /api/challenge/submit`);
 });
