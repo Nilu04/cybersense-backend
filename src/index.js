@@ -135,19 +135,38 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
-// Rate limiting
+// Render runs behind a reverse proxy. Trust the first proxy so
+// express-rate-limit can identify the real client IP instead of
+// treating every extension user as the same proxy address.
+app.set('trust proxy', 1);
+
+// General API protection. Keep this high enough for the Chrome extension
+// background/page-sync requests while still protecting the API from abuse.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 2000,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: 'Too many requests' }
 });
 app.use(limiter);
+
+// Login has its own, stricter protection. This prevents brute-force attempts
+// without allowing normal extension/mobile use to exhaust the global limit.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please wait a few minutes and try again.' }
+});
+app.use('/api/auth/login', loginLimiter);
 
 // ==================== ROOT ROUTE ====================
 app.get('/', (req, res) => {
   res.json({
     message: '🚀 CyberSenseAI API is running!',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'OK',
     timestamp: new Date().toISOString(),
     mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
@@ -1137,7 +1156,7 @@ app.get('/health', (req, res) => {
     status: 'OK',
     timestamp: new Date(),
     mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-    version: '2.0.0'
+    version: '2.1.0'
   });
 });
 
@@ -1147,7 +1166,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 Health: http://localhost:${PORT}/health`);
-  console.log(`🔐 Auth: POST /api/auth/register, /api/auth/login`);
+  console.log(`🔐 Auth: POST /api/auth/register, /api/auth/login (rate limited)`);
   console.log(`👤 Profile: GET /api/user/profile`);
   console.log(`🔍 Scan: POST /api/scan`);
   console.log(`📜 History: GET /api/history`);
