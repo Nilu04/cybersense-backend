@@ -206,6 +206,37 @@ const suspiciousDomains = [
 
 // ==================== SCAN SERVICE ====================
 
+function decodePossibleRedirectTarget(url) {
+  try {
+    const source = new URL(url);
+    const names = ['origUrl', 'originalUrl', 'url', 'target', 'redirect', 'redirectUrl', 'returnUrl', 'return'];
+    for (const name of names) {
+      const raw = source.searchParams.get(name);
+      if (!raw) continue;
+      const candidates = [raw];
+      try { candidates.push(decodeURIComponent(raw)); } catch (_) {}
+      try {
+        const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+        candidates.push(Buffer.from(padded, 'base64').toString('utf8'));
+      } catch (_) {}
+      const target = candidates.find(v => /^https?:\/\//i.test(v.trim()));
+      if (target) return target.trim();
+    }
+  } catch (_) {}
+  return null;
+}
+
+function typoSquatBrand(value) {
+  const map = {
+    'paypa1': 'PayPal', 'amaz0n': 'Amazon', 'micr0soft': 'Microsoft',
+    'appie': 'Apple', 'app1e': 'Apple', 'faceb00k': 'Facebook',
+    'netf1ix': 'Netflix', 'g00gle': 'Google'
+  };
+  const lower = value.toLowerCase();
+  return Object.entries(map).filter(([typo]) => lower.includes(typo)).map(([, brand]) => brand);
+}
+
 async function scanUrl(url) {
   const lowerUrl = url.toLowerCase();
   let riskScore = 0;
@@ -236,6 +267,43 @@ async function scanUrl(url) {
     riskScore += 15;
   } else if (lowerUrl.startsWith('https://')) {
     sslStatus = "secure";
+  }
+
+  // Inspect encoded redirect destinations such as captive portals using origUrl=base64.
+  const redirectTarget = decodePossibleRedirectTarget(url);
+  if (redirectTarget) {
+    reasons.push('Contains an encoded redirect destination');
+    riskScore += 20;
+    try {
+      const target = new URL(redirectTarget);
+      const targetHost = target.hostname.toLowerCase();
+      if (target.protocol === 'http:') {
+        reasons.push('Encoded destination uses HTTP');
+        riskScore += 15;
+      }
+      const targetBrands = typoSquatBrand(targetHost + target.pathname);
+      if (targetBrands.length) {
+        reasons.push(`Possible brand impersonation in redirect: ${targetBrands.join(', ')}`);
+        suspiciousPatternsFound.push(...targetBrands.map(b => `typosquat:${b}`));
+        riskScore += 60;
+      }
+      const targetIp = targetHost.match(/\d{1,3}(?:\.\d{1,3}){3}/);
+      if (targetIp) {
+        reasons.push('Encoded destination uses an IP address');
+        riskScore += 40;
+      }
+      if (targetHost.endsWith('.tk') || targetHost.endsWith('.ml') || targetHost.endsWith('.ga') || targetHost.endsWith('.cf') || targetHost.endsWith('.xyz') || targetHost.endsWith('.top') || targetHost.endsWith('.club') || targetHost.endsWith('.work') || targetHost.endsWith('.click')) {
+        reasons.push('Encoded destination uses a suspicious domain extension');
+        riskScore += 35;
+      }
+    } catch (_) {}
+  }
+
+  const currentBrands = typoSquatBrand(lowerUrl);
+  if (currentBrands.length) {
+    reasons.push(`Possible brand impersonation / typo-squatting: ${currentBrands.join(', ')}`);
+    suspiciousPatternsFound.push(...currentBrands.map(b => `typosquat:${b}`));
+    riskScore += 60;
   }
 
   const ipMatch = lowerUrl.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
@@ -420,8 +488,8 @@ app.post('/api/auth/login', async (req, res) => {
         apiKey: user.apiKey, 
         level: user.level, 
         xp: user.xp,
-        totalScans: await ScanHistory.countDocuments({ userId: user._id }),
-        threatsBlocked: await ScanHistory.countDocuments({ userId: user._id, status: 'blocked' })
+        totalScans: user.totalScans,
+        threatsBlocked: user.threatsBlocked
       }
     });
   } catch (error) {
@@ -458,12 +526,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
 app.get('/api/user/profile', authenticate, async (req, res) => {
   try {
-    const totalScans = await ScanHistory.countDocuments({ userId: req.user._id });
-    const threatsBlocked = await ScanHistory.countDocuments({
-      userId: req.user._id,
-      status: 'blocked'
-    });
-
     res.json({
       success: true,
       user: {
@@ -472,8 +534,8 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
         email: req.user.email,
         level: req.user.level,
         xp: req.user.xp,
-        totalScans,
-        threatsBlocked,
+        totalScans: req.user.totalScans,
+        threatsBlocked: req.user.threatsBlocked,
         reportsSubmitted: req.user.reportsSubmitted,
         profilePicture: req.user.profilePicture || null,
         createdAt: req.user.createdAt
@@ -635,20 +697,24 @@ app.get('/api/history', verifyApiKey, async (req, res) => {
     console.log('   isMasterKey:', req.isMasterKey);
     console.log('   user:', req.user?._id || 'none');
     
-    let scans;
-    
+    const requestedStatus = String(req.query?.status || '').trim().toLowerCase();
+    const validStatuses = new Set(['safe', 'suspicious', 'phishing', 'blocked']);
+    const statusFilter = validStatuses.has(requestedStatus) ? requestedStatus : null;
+    let query = {};
+
     if (req.isMasterKey) {
-      // Master key → return ALL scans
-      scans = await ScanHistory.find()
+      query = statusFilter ? { status: statusFilter } : {};
+      scans = await ScanHistory.find(query)
         .sort({ scannedAt: -1 })
         .limit(200);
-      console.log('   Returning ALL scans:', scans.length);
+      console.log('   Returning master scans:', scans.length, statusFilter || 'all');
     } else if (req.user) {
-      // User key → return only that user's scans
-      scans = await ScanHistory.find({ userId: req.user._id })
+      query = { userId: req.user._id };
+      if (statusFilter) query.status = statusFilter;
+      scans = await ScanHistory.find(query)
         .sort({ scannedAt: -1 })
-        .limit(100);
-      console.log('   Returning user scans:', scans.length);
+        .limit(200);
+      console.log('   Returning user scans:', scans.length, statusFilter || 'all');
     } else {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -669,10 +735,13 @@ app.get('/api/history', verifyApiKey, async (req, res) => {
               scan.riskScore >= 30 ? 'suspicious' : 'safe')
     }));
     
+    const count = await ScanHistory.countDocuments(query);
+
     res.json({ 
       success: true, 
       history: safeHistory,
-      count: safeHistory.length 
+      count,
+      filter: statusFilter || 'all'
     });
     
   } catch (error) {
@@ -683,36 +752,6 @@ app.get('/api/history', verifyApiKey, async (req, res) => {
     });
   }
 });
-app.get('/api/history/blocked', verifyApiKey, async (req, res) => {
-  try {
-    if (!req.user) return res.status(401).json({ success: false, error: 'User authentication required' });
-
-    const scans = await ScanHistory.find({
-      userId: req.user._id,
-      status: 'blocked'
-    }).sort({ scannedAt: -1 }).limit(100);
-
-    const history = scans.map(scan => ({
-      _id: scan._id,
-      url: scan.url,
-      isPhishing: scan.isPhishing,
-      riskScore: scan.riskScore,
-      reasons: scan.reasons || [],
-      suspiciousKeywords: scan.suspiciousKeywords || [],
-      suspiciousPatterns: scan.suspiciousPatterns || [],
-      sslStatus: scan.sslStatus || 'unknown',
-      recommendations: scan.recommendations || [],
-      scannedAt: scan.scannedAt,
-      status: 'blocked'
-    }));
-
-    res.json({ success: true, history, count: history.length });
-  } catch (error) {
-    console.error('❌ Blocked history error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // ==================== END HISTORY ROUTE ====================
 
 app.post('/api/history/:id/block', verifyApiKey, async (req, res) => {
@@ -734,13 +773,14 @@ app.post('/api/history/:id/block', verifyApiKey, async (req, res) => {
 app.delete('/api/history/all', verifyApiKey, async (req, res) => {
   try {
     if (req.isMasterKey) {
-      await ScanHistory.deleteMany({});
-    } else if (req.user) {
-      await ScanHistory.deleteMany({ userId: req.user._id });
-    } else {
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
+      const result = await ScanHistory.deleteMany({});
+      return res.json({ success: true, deleted: result.deletedCount || 0, count: 0, message: 'History cleared' });
     }
-    res.json({ success: true, message: 'User history cleared' });
+    if (!req.user) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+    const result = await ScanHistory.deleteMany({ userId: req.user._id });
+    await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -(result.deletedCount || 0) } });
+    res.json({ success: true, deleted: result.deletedCount || 0, count: 0, message: 'User history cleared' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -750,24 +790,32 @@ app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
   try {
     if (req.params.id === 'all') {
       if (req.isMasterKey) {
-        // Master key can delete all
-        await ScanHistory.deleteMany({});
-      } else if (req.user) {
-        await ScanHistory.deleteMany({ userId: req.user._id });
+        const result = await ScanHistory.deleteMany({});
+        return res.json({ success: true, deleted: result.deletedCount || 0, count: 0 });
       }
+      if (req.user) {
+        const result = await ScanHistory.deleteMany({ userId: req.user._id });
+        await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -(result.deletedCount || 0) } });
+        return res.json({ success: true, deleted: result.deletedCount || 0, count: 0 });
+      }
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    let deleted = null;
+    if (req.isMasterKey) {
+      deleted = await ScanHistory.findByIdAndDelete(req.params.id);
+    } else if (req.user) {
+      deleted = await ScanHistory.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
     } else {
-      if (req.isMasterKey) {
-        await ScanHistory.findByIdAndDelete(req.params.id);
-      } else if (req.user) {
-        await ScanHistory.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
-      }
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
-    if (req.user) {
-      const totalScans = await ScanHistory.countDocuments({ userId: req.user._id });
-      const threatsBlocked = await ScanHistory.countDocuments({ userId: req.user._id, status: 'blocked' });
-      await User.findByIdAndUpdate(req.user._id, { totalScans, threatsBlocked });
+
+    if (deleted && req.user) {
+      await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -1 } });
     }
-    res.json({ success: true });
+
+    const count = await ScanHistory.countDocuments(query);
+    res.json({ success: true, deleted: deleted ? 1 : 0, count });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -955,6 +1003,27 @@ app.get('/api/challenge/leaderboard/:week', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Allow the logged-in user to restart the current weekly challenge.
+app.post('/api/challenge/reset', authenticate, async (req, res) => {
+  try {
+    const today = new Date();
+    const challenge = await Challenge.findOne({
+      isActive: true,
+      startDate: { $lte: today },
+      endDate: { $gte: today }
+    });
+
+    if (!challenge) {
+      return res.status(404).json({ success: false, error: 'No active challenge available' });
+    }
+
+    await UserChallenge.deleteOne({ userId: req.user._id, week: challenge.week });
+    res.json({ success: true, message: 'Challenge reset successfully', week: challenge.week });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
