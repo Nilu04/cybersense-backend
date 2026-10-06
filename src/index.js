@@ -1070,19 +1070,39 @@ app.get('/api/challenge/leaderboard/:week', async (req, res) => {
 app.post('/api/challenge/reset', authenticate, async (req, res) => {
   try {
     const today = new Date();
-    const challenge = await Challenge.findOne({
+
+    // Use the same challenge that /api/challenge/current serves.
+    // This also handles older Week 1 records whose original 7-day dates expired.
+    let challenge = await Challenge.findOne({
       isActive: true,
       startDate: { $lte: today },
       endDate: { $gte: today }
     });
 
     if (!challenge) {
-      return res.status(404).json({ success: false, error: 'No active challenge available' });
+      challenge = await Challenge.findOne({ isActive: true }).sort({ week: -1 });
     }
 
+    if (!challenge) {
+      challenge = await createDefaultChallenge();
+    }
+
+    if (!challenge) {
+      return res.status(404).json({ success: false, error: 'No challenge available to reset' });
+    }
+
+    await ensureFiveChallengeQuestions(challenge);
     await UserChallenge.deleteOne({ userId: req.user._id, week: challenge.week });
-    res.json({ success: true, message: 'Challenge reset successfully', week: challenge.week });
+
+    res.json({
+      success: true,
+      message: 'Challenge reset successfully',
+      week: challenge.week,
+      totalQuestions: challenge.questions.length,
+      totalPoints: challenge.questions.reduce((sum, q) => sum + q.points, 0)
+    });
   } catch (error) {
+    console.error('Challenge reset error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1110,4 +1130,5 @@ app.listen(PORT, () => {
   console.log(`📜 History: GET /api/history`);
   console.log(`📊 Leaderboard: GET /api/leaderboard`);
   console.log(`🏆 Challenge: GET /api/challenge/current`);
+  console.log(`🔄 Challenge Reset: POST /api/challenge/reset`);
 });
