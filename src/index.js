@@ -878,6 +878,64 @@ app.get('/api/threats/stats', async (req, res) => {
 
 // ==================== WEEKLY CHALLENGE ROUTES ====================
 
+async function ensureFiveChallengeQuestions(challenge) {
+  if (!challenge || !Array.isArray(challenge.questions)) return challenge;
+  if (challenge.questions.length >= 5) return challenge;
+
+  const extraQuestions = [
+    {
+      id: 3,
+      text: "What does HTTPS indicate?",
+      options: [
+        "The website is secure and encrypted",
+        "The website is from India",
+        "The website is slow",
+        "The website is fake"
+      ],
+      correctAnswer: 0,
+      points: 10,
+      explanation: "HTTPS indicates the connection is encrypted and secure."
+    },
+    {
+      id: 4,
+      text: "What should you do if you receive a suspicious link?",
+      options: [
+        "Click it immediately to check",
+        "Share it with friends",
+        "Scan it using CyberSenseAI first",
+        "Ignore it completely"
+      ],
+      correctAnswer: 2,
+      points: 10,
+      explanation: "Always scan suspicious links using CyberSenseAI before clicking them."
+    },
+    {
+      id: 5,
+      text: "What is Two-Factor Authentication (2FA)?",
+      options: [
+        "Two different passwords",
+        "An extra security layer requiring a second verification method",
+        "Two different accounts",
+        "A type of computer virus"
+      ],
+      correctAnswer: 1,
+      points: 10,
+      explanation: "2FA adds an extra layer of security by requiring a second verification method."
+    }
+  ];
+
+  const existingIds = new Set(challenge.questions.map(q => q.id));
+  for (const question of extraQuestions) {
+    if (challenge.questions.length >= 5) break;
+    if (!existingIds.has(question.id)) challenge.questions.push(question);
+  }
+  challenge.questions = challenge.questions.slice(0, 5);
+  challenge.markModified('questions');
+  await challenge.save();
+  console.log(`✅ Weekly challenge normalized to ${challenge.questions.length} questions`);
+  return challenge;
+}
+
 app.get('/api/challenge/current', authenticate, async (req, res) => {
   try {
     const today = new Date();
@@ -895,6 +953,8 @@ app.get('/api/challenge/current', authenticate, async (req, res) => {
     if (!challenge) {
       return res.json({ success: true, hasChallenge: false, message: 'No active challenge available' });
     }
+
+    challenge = await ensureFiveChallengeQuestions(challenge);
     
     const userProgress = await UserChallenge.findOne({ userId: req.user._id, week: challenge.week });
     
