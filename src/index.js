@@ -526,6 +526,17 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
 app.get('/api/user/profile', authenticate, async (req, res) => {
   try {
+    // Keep the profile counter synchronized with actual blocked history.
+    const actualBlocked = await ScanHistory.countDocuments({
+      userId: req.user._id,
+      status: 'blocked'
+    });
+
+    if (req.user.threatsBlocked !== actualBlocked) {
+      req.user.threatsBlocked = actualBlocked;
+      await req.user.save();
+    }
+
     res.json({
       success: true,
       user: {
@@ -535,7 +546,7 @@ app.get('/api/user/profile', authenticate, async (req, res) => {
         level: req.user.level,
         xp: req.user.xp,
         totalScans: req.user.totalScans,
-        threatsBlocked: req.user.threatsBlocked,
+        threatsBlocked: actualBlocked,
         reportsSubmitted: req.user.reportsSubmitted,
         profilePicture: req.user.profilePicture || null,
         createdAt: req.user.createdAt
@@ -736,11 +747,16 @@ app.get('/api/history', verifyApiKey, async (req, res) => {
     }));
     
     const count = await ScanHistory.countDocuments(query);
+    const blockedCount = await ScanHistory.countDocuments({
+      ...(req.isMasterKey ? {} : { userId: req.user._id }),
+      status: 'blocked'
+    });
 
     res.json({ 
       success: true, 
       history: safeHistory,
       count,
+      blockedCount,
       filter: statusFilter || 'all'
     });
     
@@ -779,7 +795,10 @@ app.delete('/api/history/all', verifyApiKey, async (req, res) => {
     if (!req.user) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
     const result = await ScanHistory.deleteMany({ userId: req.user._id });
-    await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -(result.deletedCount || 0) } });
+    await User.findByIdAndUpdate(req.user._id, {
+      $inc: { totalScans: -(result.deletedCount || 0) },
+      $set: { threatsBlocked: 0 }
+    });
     res.json({ success: true, deleted: result.deletedCount || 0, count: 0, message: 'User history cleared' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -795,7 +814,10 @@ app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
       }
       if (req.user) {
         const result = await ScanHistory.deleteMany({ userId: req.user._id });
-        await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -(result.deletedCount || 0) } });
+        await User.findByIdAndUpdate(req.user._id, {
+          $inc: { totalScans: -(result.deletedCount || 0) },
+          $set: { threatsBlocked: 0 }
+        });
         return res.json({ success: true, deleted: result.deletedCount || 0, count: 0 });
       }
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -814,7 +836,8 @@ app.delete('/api/history/:id', verifyApiKey, async (req, res) => {
       await User.findByIdAndUpdate(req.user._id, { $inc: { totalScans: -1 } });
     }
 
-    const count = await ScanHistory.countDocuments(query);
+    const countQuery = req.isMasterKey ? {} : { userId: req.user._id };
+    const count = await ScanHistory.countDocuments(countQuery);
     res.json({ success: true, deleted: deleted ? 1 : 0, count });
   } catch (error) {
     res.status(500).json({ error: error.message });
