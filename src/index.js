@@ -65,6 +65,35 @@ const scanSchema = new mongoose.Schema({
 
 const ScanHistory = mongoose.model('ScanHistory', scanSchema);
 
+// Normalize previously saved high-risk/phishing scans into the blocked state.
+// This keeps existing history consistent with the current protection behaviour.
+async function normalizeBlockedScans(userId) {
+  if (!userId) return 0;
+
+  await ScanHistory.updateMany(
+    {
+      userId,
+      status: { $ne: 'blocked' },
+      $or: [
+        { isPhishing: true },
+        { riskScore: { $gte: 70 } }
+      ]
+    },
+    { $set: { status: 'blocked' } }
+  );
+
+  const count = await ScanHistory.countDocuments({
+    userId,
+    status: 'blocked'
+  });
+
+  await User.findByIdAndUpdate(userId, {
+    $set: { threatsBlocked: count }
+  });
+
+  return count;
+}
+
 // Report Model
 const reportSchema = new mongoose.Schema({
   url: { type: String, required: true },
@@ -545,16 +574,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
 app.get('/api/user/profile', authenticate, async (req, res) => {
   try {
-    // Keep the profile counter synchronized with actual blocked history.
-    const actualBlocked = await ScanHistory.countDocuments({
-      userId: req.user._id,
-      status: 'blocked'
-    });
-
-    if (req.user.threatsBlocked !== actualBlocked) {
-      req.user.threatsBlocked = actualBlocked;
-      await req.user.save();
-    }
+    // Keep the profile counter synchronized with actual blocked history,
+    // including older high-risk/phishing records saved before the blocked-state fix.
+    const actualBlocked = await normalizeBlockedScans(req.user._id);
 
     res.json({
       success: true,
@@ -626,6 +648,35 @@ app.put('/api/user/profile-picture', authenticate, async (req, res) => {
   }
 });
 
+// Reset the authenticated user's statistics and scan history.
+// Profile picture, username, email, and password are preserved.
+app.post('/api/user/reset-statistics', authenticate, async (req, res) => {
+  try {
+    const result = await ScanHistory.deleteMany({ userId: req.user._id });
+
+    req.user.level = 1;
+    req.user.xp = 0;
+    req.user.totalScans = 0;
+    req.user.threatsBlocked = 0;
+    await req.user.save();
+
+    res.json({
+      success: true,
+      message: 'Statistics and scan history reset successfully',
+      deletedScans: result.deletedCount || 0,
+      user: {
+        level: 1,
+        xp: 0,
+        totalScans: 0,
+        threatsBlocked: 0
+      }
+    });
+  } catch (error) {
+    console.error('❌ Reset statistics error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== SCAN ROUTES ====================
 
 app.post('/api/scan', verifyApiKey, async (req, res) => {
@@ -636,6 +687,11 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
     const result = await scanUrl(url);
     
     if (req.user) {
+      // A dangerous/phishing scan is treated as blocked by CyberSenseAI's protection layer.
+      // This keeps Home, History, Profile, and the blocked list consistent.
+      const isBlocked = result.isPhishing || result.riskScore >= 70;
+      const scanStatus = isBlocked ? 'blocked' : (result.riskScore >= 30 ? 'suspicious' : 'safe');
+
       const scan = new ScanHistory({
         userId: req.user._id,
         url,
@@ -646,12 +702,15 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
         suspiciousPatterns: result.suspiciousPatterns,
         sslStatus: result.sslStatus,
         recommendations: result.recommendations,
-        status: result.isPhishing ? 'phishing' : (result.riskScore >= 30 ? 'suspicious' : 'safe')
+        status: scanStatus
       });
       await scan.save();
-      
+
       await User.findByIdAndUpdate(req.user._id, {
-        $inc: { totalScans: 1 }
+        $inc: {
+          totalScans: 1,
+          threatsBlocked: isBlocked ? 1 : 0
+        }
       });
       result.scanId = scan._id;
     }
@@ -689,6 +748,7 @@ app.post('/api/history/sync', verifyApiKey, async (req, res) => {
 
       const riskScore = Math.max(0, Math.min(100, Number(item.riskScore) || 0));
       const isPhishing = item.riskLevel === 'dangerous' || riskScore >= 70;
+      const isBlocked = isPhishing;
       const reasons = Array.isArray(item.detailedReasons)
         ? item.detailedReasons
         : (Array.isArray(item.reasons) ? item.reasons : []);
@@ -703,14 +763,17 @@ app.post('/api/history/sync', verifyApiKey, async (req, res) => {
         suspiciousPatterns: Array.isArray(item.suspiciousPatterns) ? item.suspiciousPatterns : [],
         sslStatus: item.sslStatus || 'unknown',
         recommendations: Array.isArray(item.recommendations) ? item.recommendations : [],
+        status: isBlocked ? 'blocked' : (riskScore >= 30 ? 'suspicious' : 'safe'),
         scannedAt
       });
       imported++;
     }
 
     if (imported > 0) {
+      const blockedCount = await ScanHistory.countDocuments({ userId: req.user._id, status: 'blocked' });
       await User.findByIdAndUpdate(req.user._id, {
-        $inc: { totalScans: imported }
+        $inc: { totalScans: imported },
+        $set: { threatsBlocked: blockedCount }
       });
     }
 
@@ -724,6 +787,10 @@ app.post('/api/history/sync', verifyApiKey, async (req, res) => {
 app.get('/api/history', verifyApiKey, async (req, res) => {
   try {
     console.log('📜 History request');
+
+    if (req.user && !req.isMasterKey) {
+      await normalizeBlockedScans(req.user._id);
+    }
     console.log('   isMasterKey:', req.isMasterKey);
     console.log('   user:', req.user?._id || 'none');
     
