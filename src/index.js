@@ -7,7 +7,6 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { scanUrlWithVirusTotal } = require('./services/virusTotalService');
 
 dotenv.config();
 
@@ -686,35 +685,6 @@ app.post('/api/scan', verifyApiKey, async (req, res) => {
     if (!url) return res.status(400).json({ error: 'URL required' });
     
     const result = await scanUrl(url);
-
-    // External threat-intelligence layer. If VirusTotal is unavailable or
-    // rate-limited, the existing rule-based scan still works normally.
-    const virusTotal = await scanUrlWithVirusTotal(url);
-
-    // Combine VirusTotal detections with the existing rule-based risk score.
-    // VirusTotal never reduces a score; it only adds evidence when detections
-    // are reported. This keeps the original scanner behaviour intact.
-    if (virusTotal.available && virusTotal.status !== 'pending') {
-      if (virusTotal.malicious > 0) {
-        result.riskScore = Math.min(100, result.riskScore + 40);
-        result.reasons.push(
-          `VirusTotal detected the URL as malicious (${virusTotal.malicious} engine${virusTotal.malicious === 1 ? '' : 's'})`
-        );
-      } else if (virusTotal.suspicious > 0) {
-        result.riskScore = Math.min(100, result.riskScore + 20);
-        result.reasons.push(
-          `VirusTotal reported suspicious detections (${virusTotal.suspicious} engine${virusTotal.suspicious === 1 ? '' : 's'})`
-        );
-      }
-
-      result.isPhishing = result.riskScore >= 50;
-      if (result.riskScore >= 70) {
-        result.recommendations = ["🚨 DO NOT proceed", "📢 Report this URL", "🔐 Never enter personal information"];
-      } else if (result.riskScore >= 30) {
-        result.recommendations = ["⚠️ Be cautious", "🔍 Verify through official channels", "❌ Don't click suspicious links"];
-      }
-    }
-    result.virusTotal = virusTotal;
     
     if (req.user) {
       // A dangerous/phishing scan is treated as blocked by CyberSenseAI's protection layer.
